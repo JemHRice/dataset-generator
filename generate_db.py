@@ -15,6 +15,8 @@ Requirements:
 
 import os
 import sys
+import json
+from pathlib import Path
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import psycopg2
@@ -321,67 +323,49 @@ def generate_dim_salesperson(conn, store_ids):
 
 
 def generate_dim_product():
-    """Generate product dimension data across all categories."""
-    brands = [
-        "Nike",
-        "Adidas",
-        "Puma",
-        "Lululemon",
-        "Asics",
-        "Decathlon",
-        "Rebel",
-        "Callaway",
-        "TaylorMade",
-        "Ping",
-        "Wilson",
-        "Spalding",
-        "Dunlop",
-    ]
+    """Load the ProductForge-generated catalogue and attach pricing.
 
-    series_names = [
-        "Pro", "Elite", "Tour", "Sport", "Classic", "Ultra", "Performance",
-        "Champion", "Advanced", "Competition", "Training", "Junior", "Senior",
-        "Club", "Team", "100", "200", "300", "500", "X1", "X2", "V2", "V3",
-        "Plus", "Max", "Air", "Flex", "Speed", "Power", "Force",
-    ]
+    Product names and brands come from products.json (built by build_catalogue.py,
+    which uses the ProductForge model). Run build_catalogue.py to regenerate it.
+    Price tiers, margins, and weights are assigned here as before.
+    """
+    catalogue_path = Path(__file__).parent / "products.json"
+    if not catalogue_path.exists():
+        raise FileNotFoundError(
+            "products.json not found. Generate the catalogue first:\n"
+            "  ../productforge/.venv/Scripts/python.exe build_catalogue.py"
+        )
+    catalogue = json.loads(catalogue_path.read_text(encoding="utf-8"))
 
     data = []
-    product_id = 1
+    for row in catalogue:
+        category = row["category"]
+        subcategory = row["subcategory"]
 
-    for category, cat_info in CATEGORIES.items():
-        for _ in range(cat_info["products"]):
-            brand = np.random.choice(brands)
-            subcategory = np.random.choice(cat_info["subcategories"])
-            series = np.random.choice(series_names)
-            product_name = f"{brand} {subcategory} {series}"
+        # Price distribution: 40% budget ($5-$50), 40% mid ($50-$200), 20% premium ($200-$2000)
+        price_tier = np.random.choice(["budget", "mid", "premium"], p=[0.4, 0.4, 0.2])
+        if price_tier == "budget":
+            unit_cost = np.random.uniform(3, 30)
+        elif price_tier == "mid":
+            unit_cost = np.random.uniform(30, 120)
+        else:
+            unit_cost = np.random.uniform(120, 1200)
 
-            # Price distribution: 40% budget ($5-$50), 40% mid ($50-$200), 20% premium ($200-$2000)
-            price_tier = np.random.choice(
-                ["budget", "mid", "premium"], p=[0.4, 0.4, 0.2]
+        margin = CATEGORIES[category]["margin"]
+        unit_price = unit_cost * margin
+        weight_kg = np.random.uniform(0.1, 5.0)
+
+        data.append(
+            (
+                row["product_name"],
+                row["brand"],
+                category,
+                subcategory,
+                unit_cost,
+                unit_price,
+                weight_kg,
             )
-            if price_tier == "budget":
-                unit_cost = np.random.uniform(3, 30)
-            elif price_tier == "mid":
-                unit_cost = np.random.uniform(30, 120)
-            else:
-                unit_cost = np.random.uniform(120, 1200)
-
-            margin = cat_info["margin"]
-            unit_price = unit_cost * margin
-            weight_kg = np.random.uniform(0.1, 5.0)
-
-            data.append(
-                (
-                    product_name,
-                    brand,
-                    category,
-                    subcategory,
-                    unit_cost,
-                    unit_price,
-                    weight_kg,
-                )
-            )
-            product_id += 1
+        )
 
     return data
 
