@@ -7,10 +7,14 @@ Balls, Pads...). This adapter bridges that:
 
   for each (sport, product_type):
     1. drive ProductForge with a product-type seed to steer the output
-    2. keep only names that classify into this exact bucket
+    2. keep only names that classify into this exact bucket, AND — for core
+       product buckets — drop peripherals/add-ons (covers, laces, keychains,
+       bike parts, "X Socks/Wristband"...) that aren't the product itself
     3. top up any shortfall with a realistic template (ProductForge starves
        minority types like gloves/pads and vague ones like Apparel/Accessories)
     4. prepend a coined brand from a reusable pool
+
+Generation is seeded (python + torch) so re-running yields the same catalogue.
 
 Output: products.json (a static catalogue). generate_db.py reads that, so the
 DB build stays light (no torch). Re-run this only when you want a fresh catalogue.
@@ -71,7 +75,9 @@ BUCKETS: dict[str, list[tuple]] = {
         ("Hoops", ["hoop", "backboard", "rim", "net"], "Basketball Hoop", "Basketball Hoop"),
         ("Shoes", ["shoe", "sneaker", "trainer"], "Basketball Shoe", "Basketball Shoes"),
         ("Jerseys", ["jersey", "shorts", "shirt"], "Basketball Jersey", "Basketball Jersey"),
-        ("Balls", ["ball"], "Basketball", "Basketball"),
+        # "basketball" (not "ball") — with word-boundary matching the sport name is
+        # the ball itself; bare "ball" never appears in a basketball product name.
+        ("Balls", ["basketball"], "Basketball", "Basketball"),
     ],
     "Tennis": [
         ("Racquets", ["racquet", "racket"], "Tennis Racquet", "Tennis Racquet"),
@@ -134,13 +140,74 @@ _BANNED = re.compile(
 )
 
 
+# Buckets that legitimately hold peripheral/add-on items — never noise-filtered.
+# They're deliberate grab-bags (a golf "Accessory" can be a tee, towel, marker…),
+# so the core-product head-noun test below doesn't apply to them.
+_PERIPHERAL_BUCKETS = {"Accessories", "Apparel", "Training Gear"}
+
+# Trailing words that are size / colour / audience / sport / marketing modifiers
+# rather than the product noun. Stripped from the tail before reading the head
+# noun, so "Soccer Ball Size 5 for Kids" still resolves to "ball", and
+# "Kickboard for Swimming" to "kickboard".
+_QUALIFIERS = frozenset((
+    "for", "with", "and", "the", "of", "in", "by", "to", "a", "an", "or",
+    "set", "sets", "pack", "packs", "kit", "size", "sized", "sizes",
+    "pair", "pairs", "pc", "pcs", "piece", "pieces", "new", "official",
+    "men", "mens", "man", "women", "womens", "woman", "kids", "kid", "youth",
+    "adult", "adults", "junior", "boys", "boy", "girls", "girl", "unisex",
+    "toddler", "baby", "children", "childrens", "mens", "ladies",
+    "black", "white", "blue", "red", "green", "yellow", "pink", "purple",
+    "grey", "gray", "orange", "silver", "gold", "navy", "teal", "brown",
+    "small", "medium", "large", "xl", "xxl", "xxxl", "xs", "s", "m", "l",
+    "indoor", "outdoor", "portable", "foldable", "adjustable", "waterproof",
+    "premium", "deluxe", "professional", "lightweight", "durable", "mini",
+    "travel", "home", "reusable", "automatic", "wireless", "long", "short",
+    "training", "practice", "sport", "sports", "color", "colour",
+    "swim", "swimming", "cricket", "soccer", "tennis", "golf", "running",
+    "cycling", "gym", "fitness",
+))
+
+
+def _has_kw(low: str, kw: str) -> bool:
+    """Whole-word keyword match, plural-tolerant ('goggle' matches 'goggles',
+    'watch' matches 'watches') but boundary-anchored so 'ball' never matches
+    inside 'basketball'."""
+    return re.search(rf"\b{re.escape(kw)}(?:es|s)?\b", low) is not None
+
+
+def _head_noun(name: str) -> str:
+    """The product noun a name is really about: its last alphabetic token after
+    cutting any trailing prepositional phrase and dropping trailing qualifiers.
+    'Cricket Bat Covers for Men' -> 'covers'; 'Speedometer for Road Bike' ->
+    'speedometer'; 'Ball with Pump' -> 'ball'."""
+    toks = re.findall(r"[a-z]+", name.lower())
+    for prep in ("for", "with"):           # the head noun precedes "... for/with X"
+        if prep in toks[1:]:
+            toks = toks[:toks.index(prep, 1)]
+    while toks and (len(toks[-1]) <= 1 or toks[-1] in _QUALIFIERS):
+        toks.pop()
+    return toks[-1] if toks else ""
+
+
 def classify(name: str, sport: str) -> str | None:
     """Return the bucket a name belongs to (priority order), or None."""
     low = name.lower()
     for bucket_type, kws, _seed, _noun in BUCKETS[sport]:
-        if any(kw in low for kw in kws):
+        if any(_has_kw(low, kw) for kw in kws):
             return bucket_type
     return None
+
+
+def is_core_noise(name: str, sport: str, bucket_type: str) -> bool:
+    """True if `name` is a peripheral/add-on wrongly landing in a *core* bucket
+    — i.e. its head noun isn't the bucket's product. 'Cricket Bat Tape' (head
+    'tape') and 'Basketball Stickers' (head 'stickers') are noise; 'Cricket Bat'
+    and 'Basketballs' are not."""
+    if bucket_type in _PERIPHERAL_BUCKETS:
+        return False
+    head = _head_noun(name)
+    kws = next(kw for bt, kw, _s, _n in BUCKETS[sport] if bt == bucket_type)
+    return not any(_has_kw(head, kw) for kw in kws)
 
 
 def tidy(name: str) -> str:
@@ -158,6 +225,16 @@ def targets(total: int, n_buckets: int) -> list[int]:
 
 def build() -> list[dict]:
     rng = random.Random(SEED)
+    # ProductForge samples (do_sample=True); seed torch so the catalogue is
+    # reproducible across runs, matching the python-side rng above.
+    try:
+        import torch
+        torch.manual_seed(SEED)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(SEED)
+    except ImportError:
+        pass
+
     catalogue: list[dict] = []
     seen: set[str] = set()
     report: list[str] = []
@@ -175,13 +252,17 @@ def build() -> list[dict]:
         for (bucket_type, kws, seed, noun), want in zip(buckets, per):
             chosen: list[str] = []
 
-            # 1) ProductForge, steered toward the product type
+            # 1) ProductForge, steered toward the product type. Over-generate:
+            #    dropping peripherals (covers/laces/parts) thins the yield, so ask
+            #    for plenty and let the template fallback cover any shortfall.
             pf_names = generate_products("sports", pf_sub, neutral,
-                                         n=want + 8, seed=seed)
+                                         n=want * 2 + 8, seed=seed)
             for body in pf_names:
                 if len(chosen) >= want:
                     break
-                if classify(body, sport) != bucket_type or _BANNED.search(body):
+                if (classify(body, sport) != bucket_type
+                        or is_core_noise(body, sport, bucket_type)
+                        or _BANNED.search(body)):
                     continue
                 brand = rng.choice(BRANDS)
                 name = tidy(f"{brand} {body}")
@@ -198,7 +279,9 @@ def build() -> list[dict]:
                 brand = rng.choice(BRANDS)
                 desc = rng.choice(DESCRIPTORS)
                 name = tidy(f"{brand} {desc} {noun}")
-                if classify(name, sport) != bucket_type or name.lower() in seen:
+                if (classify(name, sport) != bucket_type
+                        or is_core_noise(name, sport, bucket_type)
+                        or name.lower() in seen):
                     continue
                 seen.add(name.lower())
                 chosen.append(name)
@@ -220,13 +303,19 @@ def validate(catalogue: list[dict]) -> None:
     expected = sum(c["products"] for c in config.CATEGORIES.values())
     assert len(catalogue) == expected, f"size {len(catalogue)} != {expected}"
     for row in catalogue:
-        assert classify(row["product_name"], row["category"]) == row["subcategory"], \
-            f"misclassified: {row}"
-        assert not _BANNED.search(row["product_name"]), f"real IP leak: {row['product_name']}"
+        name, sport, sub = row["product_name"], row["category"], row["subcategory"]
+        # Independent post-conditions: these check properties of `name` itself,
+        # not the value we happened to store, so they can actually fail.
+        assert sub in {b[0] for b in BUCKETS[sport]}, f"unknown bucket: {row}"
+        assert classify(name, sport) == sub, f"misclassified ({classify(name, sport)}): {row}"
+        assert not is_core_noise(name, sport, sub), f"peripheral in core bucket: {name}"
+        assert not _BANNED.search(name), f"real IP leak: {name}"
+        assert row["brand"] in BRANDS, f"brand not in pool: {row}"
+        assert name.split()[0] == row["brand"], f"brand/name mismatch: {row}"
     names = [r["product_name"].lower() for r in catalogue]
     assert len(set(names)) == len(names), "duplicate product names"
     print(f"\nValidation OK: {len(catalogue)} products, all bucket-coherent, "
-          f"0 real-IP, all unique.")
+          f"no peripherals in core buckets, 0 real-IP, all unique.")
 
 
 def main() -> None:
