@@ -46,6 +46,8 @@ NUM_SALESPERSONS = config.NUM_SALESPERSONS
 NUM_PRODUCTS = config.NUM_PRODUCTS
 NUM_STORES = config.NUM_STORES
 NUM_CUSTOMERS = config.NUM_CUSTOMERS
+CUSTOMER_INITIAL_BASE_FRACTION = config.CUSTOMER_INITIAL_BASE_FRACTION
+CUSTOMER_REPEAT_SIGMA = config.CUSTOMER_REPEAT_SIGMA
 STATES = config.STATES
 CATEGORIES = config.CATEGORIES
 SHIPPING_METHODS = config.SHIPPING_METHODS
@@ -208,15 +210,31 @@ def create_schema(conn):
         );
     """)
 
+    # dim_customer
+    cur.execute("""
+        CREATE TABLE dim_customer (
+            customer_id SERIAL PRIMARY KEY,
+            first_name VARCHAR(100) NOT NULL,
+            last_name VARCHAR(100) NOT NULL,
+            email VARCHAR(150) UNIQUE NOT NULL,
+            gender VARCHAR(20) NOT NULL,
+            date_of_birth DATE NOT NULL,
+            signup_date DATE NOT NULL,
+            state_id INTEGER NOT NULL REFERENCES dim_state(state_id)
+        );
+    """)
+
     # fact_orders
     cur.execute("""
         CREATE TABLE fact_orders (
             order_id SERIAL PRIMARY KEY,
             order_date_id INTEGER NOT NULL REFERENCES dim_date(date_id),
+            ship_date_id INTEGER REFERENCES dim_date(date_id),
+            delivery_date_id INTEGER REFERENCES dim_date(date_id),
             store_id INTEGER NOT NULL REFERENCES dim_store(store_id),
             salesperson_id INTEGER NOT NULL REFERENCES dim_salesperson(salesperson_id),
             shipping_method_id INTEGER NOT NULL REFERENCES dim_shipping_method(shipping_method_id),
-            customer_id INTEGER NOT NULL,
+            customer_id INTEGER NOT NULL REFERENCES dim_customer(customer_id),
             order_status VARCHAR(20) NOT NULL,
             shipping_cost NUMERIC(10, 2) NOT NULL,
             total_order_value NUMERIC(12, 2) NOT NULL
@@ -232,7 +250,8 @@ def create_schema(conn):
             quantity INTEGER NOT NULL CHECK (quantity >= 1 AND quantity <= 5),
             unit_price_at_sale NUMERIC(10, 2) NOT NULL,
             discount_applied NUMERIC(5, 3) NOT NULL CHECK (discount_applied >= 0 AND discount_applied <= 1),
-            line_total NUMERIC(12, 2) NOT NULL
+            line_total NUMERIC(12, 2) NOT NULL,
+            promotion_id INTEGER REFERENCES dim_promotions(promotion_id)
         );
     """)
 
@@ -249,12 +268,16 @@ def create_indexes(conn):
         "CREATE INDEX idx_store_state ON dim_store(state_id);",
         "CREATE INDEX idx_salesperson_store ON dim_salesperson(store_id);",
         "CREATE INDEX idx_orders_date ON fact_orders(order_date_id);",
+        "CREATE INDEX idx_orders_ship_date ON fact_orders(ship_date_id);",
+        "CREATE INDEX idx_orders_delivery_date ON fact_orders(delivery_date_id);",
         "CREATE INDEX idx_orders_store ON fact_orders(store_id);",
         "CREATE INDEX idx_orders_salesperson ON fact_orders(salesperson_id);",
         "CREATE INDEX idx_orders_shipping ON fact_orders(shipping_method_id);",
         "CREATE INDEX idx_orders_customer ON fact_orders(customer_id);",
+        "CREATE INDEX idx_customer_state ON dim_customer(state_id);",
         "CREATE INDEX idx_order_items_order ON fact_order_items(order_id);",
         "CREATE INDEX idx_order_items_product ON fact_order_items(product_id);",
+        "CREATE INDEX idx_order_items_promotion ON fact_order_items(promotion_id);",
         "CREATE INDEX idx_date_full_date ON dim_date(full_date);",
     ]
 
@@ -263,6 +286,41 @@ def create_indexes(conn):
 
     conn.commit()
     print("✓ Indexes created")
+
+
+def create_views(conn):
+    """Create convenience views.
+
+    vw_net_sales exposes line-level *recognised* revenue: it joins orders to
+    their items but keeps only Delivered orders, so revenue measures built on it
+    don't accidentally include Cancelled/Processing orders. Use the raw fact
+    tables for operational/funnel analysis where every status matters.
+    """
+    cur = conn.cursor()
+    print("\n[VIEWS] Creating views...")
+
+    cur.execute("""
+        CREATE VIEW vw_net_sales AS
+        SELECT
+            oi.order_item_id,
+            o.order_id,
+            o.order_date_id,
+            o.store_id,
+            o.salesperson_id,
+            o.customer_id,
+            oi.product_id,
+            oi.promotion_id,
+            oi.quantity,
+            oi.unit_price_at_sale,
+            oi.discount_applied,
+            oi.line_total
+        FROM fact_order_items oi
+        JOIN fact_orders o ON oi.order_id = o.order_id
+        WHERE o.order_status = 'Delivered';
+    """)
+
+    conn.commit()
+    print("✓ Views created")
 
 
 def generate_dim_state():
@@ -318,6 +376,66 @@ def generate_dim_salesperson(conn, store_ids):
             )
 
             data.append((first_name, last_name, email, hire_date, store_id))
+
+    return data
+
+
+def generate_dim_customer(conn):
+    """Generate the customer dimension.
+
+    Customers are split into two cohorts so that acquisition/cohort analysis is
+    meaningful:
+      - an initial base (CUSTOMER_INITIAL_BASE_FRACTION) that already exists on
+        START_DATE, and
+      - the remainder, acquired gradually across the date range with an
+        increasing rate (the business grows over time).
+
+    Home state is distributed by population weight (same weights as stores).
+    A per-customer purchase-frequency weight is NOT stored here; it is drawn at
+    order-generation time from CUSTOMER_REPEAT_SIGMA.
+    """
+    fake = Faker()
+    cur = conn.cursor()
+
+    cur.execute("SELECT state_id, state_code FROM dim_state ORDER BY state_id;")
+    state_map = {row[1]: row[0] for row in cur.fetchall()}
+
+    # State distribution by population weight
+    state_codes = [info["code"] for info in STATES.values()]
+    state_probs = np.array([info["weight"] for info in STATES.values()])
+    state_probs = state_probs / state_probs.sum()
+
+    total_days = (GENERATION_END_DATE - GENERATION_START_DATE).days
+    n_base = round(NUM_CUSTOMERS * CUSTOMER_INITIAL_BASE_FRACTION)
+
+    data = []
+    for i in range(NUM_CUSTOMERS):
+        gender = np.random.choice(["Male", "Female", "Other"], p=[0.49, 0.49, 0.02])
+        if gender == "Male":
+            first_name = fake.first_name_male()
+        elif gender == "Female":
+            first_name = fake.first_name_female()
+        else:
+            first_name = fake.first_name()
+        last_name = fake.last_name()
+        email = fake.unique.email()
+        date_of_birth = fake.date_between_dates(
+            date_start=datetime(1955, 1, 1), date_end=datetime(2006, 12, 31)
+        )
+
+        if i < n_base:
+            signup_date = GENERATION_START_DATE.date()
+        else:
+            # Skew acquisition toward later dates (u**0.8 pushes mass to the end)
+            offset = int(total_days * (np.random.random() ** 0.8))
+            signup_date = (GENERATION_START_DATE + timedelta(days=offset)).date()
+
+        state_code = np.random.choice(state_codes, p=state_probs)
+        state_id = state_map[state_code]
+
+        data.append(
+            (first_name, last_name, email, gender, date_of_birth, signup_date, state_id)
+        )
 
     return data
 
@@ -505,10 +623,13 @@ def generate_fact_orders(conn):
     date_rows = cur.fetchall()
     date_map = {row[1]: row[0] for row in date_rows}
 
-    cur.execute("SELECT shipping_method_id, flat_cost FROM dim_shipping_method;")
+    cur.execute(
+        "SELECT shipping_method_id, flat_cost, estimated_days_min, estimated_days_max FROM dim_shipping_method;"
+    )
     shipping_rows = cur.fetchall()
     shipping_methods = [row[0] for row in shipping_rows]
     shipping_cost_lookup = {row[0]: float(row[1]) for row in shipping_rows}
+    shipping_days_lookup = {row[0]: (int(row[2]), int(row[3])) for row in shipping_rows}
 
     cur.execute(
         "SELECT promotion_id, start_date, end_date, affected_category, discount_rate FROM dim_promotions;"
@@ -522,6 +643,17 @@ def generate_fact_orders(conn):
         if cat not in products_by_category:
             products_by_category[cat] = []
         products_by_category[cat].append(prod_id)
+
+    # Load customers sorted by signup date, with a hidden purchase-frequency
+    # weight per customer (lognormal: most buy rarely, a few buy a lot). Sorting
+    # by signup date lets us sample only customers who already exist on each day.
+    cur.execute("SELECT customer_id, signup_date FROM dim_customer ORDER BY signup_date;")
+    customer_rows = cur.fetchall()
+    customer_ids = np.array([row[0] for row in customer_rows])
+    customer_signups = [row[1] for row in customer_rows]
+    customer_weights = np.random.lognormal(
+        mean=0.0, sigma=CUSTOMER_REPEAT_SIGMA, size=len(customer_ids)
+    )
 
     # Assign weights to stores
     store_weights = {store_id: np.random.uniform(0.5, 3.0) for store_id in store_ids}
@@ -599,10 +731,30 @@ def generate_fact_orders(conn):
     store_weight_array = np.array([store_weights[sid] for sid in store_ids])
     store_weight_array = store_weight_array / store_weight_array.sum()
 
-    # Generate orders
-    order_id = 1
+    # Reverse date lookup (date_id -> full_date) for fulfillment-date arithmetic
+    id_to_date = {row[0]: row[1] for row in date_rows}
+
+    # Generate orders. Days are processed chronologically (order_date_volumes is
+    # built in date order), so we can grow the eligible-customer prefix as we go.
+    elig_count = 0  # customers who have signed up on/before the current day
     for date_id, volume in order_date_volumes.items():
-        for _ in range(volume):
+        full_date = id_to_date[date_id]
+
+        # Advance customer eligibility to include everyone signed up by today
+        while elig_count < len(customer_signups) and customer_signups[elig_count] <= full_date:
+            elig_count += 1
+
+        # Sample this day's customers (weighted by purchase frequency)
+        if elig_count > 0 and volume > 0:
+            elig_weights = customer_weights[:elig_count]
+            elig_weights = elig_weights / elig_weights.sum()
+            day_customers = np.random.choice(
+                customer_ids[:elig_count], size=volume, p=elig_weights
+            )
+        else:
+            day_customers = np.array([], dtype=int)
+
+        for i in range(volume):
             store_id = int(np.random.choice(store_ids, p=store_weight_array))
             available_salespersons = salesperson_by_store.get(store_id, [])
             if not available_salespersons:
@@ -615,7 +767,7 @@ def generate_fact_orders(conn):
             salesperson_id = int(np.random.choice(available_salespersons, p=sp_weights))
 
             shipping_method_id = int(np.random.choice(shipping_methods))
-            customer_id = int(np.random.randint(1, NUM_CUSTOMERS + 1))
+            customer_id = int(day_customers[i])
 
             # Order status: 94% delivered, 3% processing, 3% cancelled
             status = np.random.choice(
@@ -624,12 +776,28 @@ def generate_fact_orders(conn):
 
             shipping_cost = shipping_cost_lookup[shipping_method_id]
 
+            # Fulfillment dates: only Delivered orders have ship + delivery dates.
+            # Processing (not yet shipped) and Cancelled have neither. Dates that
+            # fall past the end of dim_date are left NULL (still in transit).
+            ship_date_id = None
+            delivery_date_id = None
+            if status == "Delivered":
+                lag = int(np.random.randint(0, 3))  # 0-2 day processing lag
+                ship_date = full_date + timedelta(days=lag)
+                ship_date_id = date_map.get(ship_date)
+                dmin, dmax = shipping_days_lookup[shipping_method_id]
+                transit = int(np.random.randint(dmin, dmax + 1))
+                delivery_date = ship_date + timedelta(days=transit)
+                delivery_date_id = date_map.get(delivery_date)
+
             # Placeholder for total_order_value (will be calculated from line items)
             total_order_value = 0.0
 
             orders.append(
                 (
                     date_id,
+                    ship_date_id,
+                    delivery_date_id,
                     store_id,
                     salesperson_id,
                     shipping_method_id,
@@ -640,16 +808,14 @@ def generate_fact_orders(conn):
                 )
             )
 
-            order_id += 1
-
     # Batch insert orders
     print(f"  Inserting {len(orders):,} orders...")
     execute_batch(
         cur,
         """
         INSERT INTO fact_orders
-        (order_date_id, store_id, salesperson_id, shipping_method_id, customer_id, order_status, shipping_cost, total_order_value)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        (order_date_id, ship_date_id, delivery_date_id, store_id, salesperson_id, shipping_method_id, customer_id, order_status, shipping_cost, total_order_value)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         orders,
         page_size=1000,
@@ -701,6 +867,8 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
 
     for order_id, (
         date_id,
+        ship_date_id,
+        delivery_date_id,
         store_id,
         sp_id,
         shipping_id,
@@ -733,16 +901,23 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
 
             quantity = int(np.random.randint(1, 6))
             unit_price = float(product_data[product_id]["price"])
+            product_category = product_data[product_id]["category"]
 
-            # Determine discount
-            if active_promos:
-                # Promotion active: use promotion discount ± 5%
-                base_discount = active_promos[0][2]  # discount_rate
+            # Determine discount. A promotion only applies to items in its own
+            # category; the matching promotion is recorded against the line so
+            # promo lift can be attributed directly.
+            matching_promo = next(
+                (p for p in active_promos if p[1] == product_category), None
+            )
+            if matching_promo is not None:
+                promotion_id = matching_promo[0]
+                base_discount = matching_promo[2]  # discount_rate
                 discount = min(
                     0.3, max(0.0, base_discount + np.random.uniform(-0.05, 0.05))
                 )
             else:
-                # No promotion
+                # No promotion for this category
+                promotion_id = None
                 discount_rand = np.random.random()
                 if discount_rand < 0.70:
                     discount = 0.0
@@ -755,7 +930,15 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
             order_value += line_total
 
             line_items.append(
-                (order_id, product_id, quantity, unit_price, discount, line_total)
+                (
+                    order_id,
+                    product_id,
+                    quantity,
+                    unit_price,
+                    discount,
+                    line_total,
+                    promotion_id,
+                )
             )
 
         order_totals[order_id] = order_value
@@ -766,8 +949,8 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
         cur,
         """
         INSERT INTO fact_order_items
-        (order_id, product_id, quantity, unit_price_at_sale, discount_applied, line_total)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        (order_id, product_id, quantity, unit_price_at_sale, discount_applied, line_total, promotion_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
         line_items,
         page_size=1000,
@@ -818,6 +1001,13 @@ def insert_data(conn, table_name, data):
             data,
             page_size=1000,
         )
+    elif table_name == "dim_customer":
+        execute_batch(
+            cur,
+            "INSERT INTO dim_customer (first_name, last_name, email, gender, date_of_birth, signup_date, state_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            data,
+            page_size=1000,
+        )
     elif table_name == "dim_shipping_method":
         execute_batch(
             cur,
@@ -855,6 +1045,7 @@ def print_row_counts(conn):
         "dim_store",
         "dim_salesperson",
         "dim_product",
+        "dim_customer",
         "dim_shipping_method",
         "dim_promotions",
         "dim_date",
@@ -924,6 +1115,9 @@ def main():
         print("  - dim_date")
         insert_data(conn, "dim_date", generate_dim_date())
 
+        print("  - dim_customer")
+        insert_data(conn, "dim_customer", generate_dim_customer(conn))
+
         # Generate fact tables
         orders, products_by_category, date_map, promotions = generate_fact_orders(conn)
         generate_fact_order_items(
@@ -932,6 +1126,9 @@ def main():
 
         # Create indexes
         create_indexes(conn)
+
+        # Create views
+        create_views(conn)
 
         # Print final row counts
         print_row_counts(conn)

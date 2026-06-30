@@ -24,7 +24,7 @@
 # If you want the exact same data every time (useful for sharing or comparing),
 # set USE_FIXED_SEED to True.
 
-USE_FIXED_SEED = False
+USE_FIXED_SEED = True
 RANDOM_SEED = 42  # Only matters if USE_FIXED_SEED is True above
 
 
@@ -46,7 +46,25 @@ TARGET_ORDER_ITEMS = (
 NUM_STORES = 50  # Number of retail store locations
 NUM_SALESPERSONS = 100  # Total sales staff (spread across all stores)
 NUM_PRODUCTS = 400  # Total products in the catalogue
-NUM_CUSTOMERS = 150000  # Size of the customer pool (unique customer IDs)
+NUM_CUSTOMERS = 75000  # Size of the customer pool (unique customer IDs)
+
+
+# -----------------------------------------------------------------------------
+# CUSTOMER BEHAVIOUR
+# -----------------------------------------------------------------------------
+# Controls how the customer base is built and how repeat-purchasing behaves.
+#
+# CUSTOMER_INITIAL_BASE_FRACTION — share of customers who already exist on the
+#   first day (START_DATE). The rest are "acquired" gradually across the date
+#   range, so cohort/acquisition analysis is meaningful. 0.40 = 40% existing.
+#
+# CUSTOMER_REPEAT_SIGMA — spread of how often customers buy. Each customer gets
+#   a hidden frequency weight drawn from a lognormal distribution; higher sigma
+#   means a few customers buy a LOT while most buy rarely (more skewed). Typical
+#   range 0.6 (fairly even) to 1.4 (very skewed). 1.0 is a realistic default.
+
+CUSTOMER_INITIAL_BASE_FRACTION = 0.40
+CUSTOMER_REPEAT_SIGMA = 1.0
 
 
 # -----------------------------------------------------------------------------
