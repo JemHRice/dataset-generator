@@ -387,6 +387,12 @@ PROMOTIONS = [
 #
 # These are Australian national holidays 2020-2024.
 # Update these if you change your date range or want different holiday patterns.
+#
+# PUBLIC_HOLIDAY_VOLUME_MULTIPLIER — how much trade drops on a public holiday.
+#   0.45 means a holiday does about 45% of a normal day's orders. Set it to 1.0
+#   if you want holidays to trade normally, or 0.0 for "completely shut".
+
+PUBLIC_HOLIDAY_VOLUME_MULTIPLIER = 0.45
 
 PUBLIC_HOLIDAYS = [
     (2020, 1, 1),

@@ -63,6 +63,9 @@ SUBURBS_BY_STATE = config.SUBURBS_BY_STATE
 GENERATION_START_DATE = datetime(*config.START_DATE)
 GENERATION_END_DATE = datetime(*config.END_DATE)
 PUBLIC_HOLIDAYS = {datetime(*d) for d in config.PUBLIC_HOLIDAYS}
+# Same set as plain dates, for comparing against the date values coming back
+# out of dim_date (psycopg2 returns DATE columns as datetime.date, not datetime).
+PUBLIC_HOLIDAY_DATES = {d.date() for d in PUBLIC_HOLIDAYS}
 
 
 def connect_postgres(create_db=True):
@@ -683,19 +686,15 @@ def generate_fact_orders(conn):
     days_in_period = (GENERATION_END_DATE - GENERATION_START_DATE).days + 1
     base_daily_volume = TARGET_ORDERS / days_in_period
 
-    # Apply yearly trends: ±5% to ±15% change per year
-    _y2020 = 1.0
-    _y2021 = _y2020 + np.random.uniform(-0.05, 0.15)
-    _y2022 = _y2021 + np.random.uniform(-0.05, 0.15)
-    _y2023 = _y2022 + np.random.uniform(-0.05, 0.15)
-    _y2024 = _y2023 + np.random.uniform(-0.05, 0.15)
-    yearly_multipliers = {
-        2020: _y2020,
-        2021: _y2021,
-        2022: _y2022,
-        2023: _y2023,
-        2024: _y2024,
-    }
+    # Year-on-year trend: -5% to +15% change per year, compounding from a base
+    # of 1.0 in the first year. Derived from the configured date range — this
+    # was previously a hardcoded 2020-2024 map, so changing START_DATE/END_DATE
+    # silently flattened the growth trend to 1.0 for every year outside it.
+    yearly_multipliers = {}
+    _multiplier = 1.0
+    for _year in range(GENERATION_START_DATE.year, GENERATION_END_DATE.year + 1):
+        yearly_multipliers[_year] = _multiplier
+        _multiplier += np.random.uniform(-0.05, 0.15)
 
     # Apply promotional boosts
     for prom_id, start, end, category, discount_rate in promotions:
@@ -730,11 +729,25 @@ def generate_fact_orders(conn):
         # Promotions boost
         promo_boost = daily_promo_boosts.get(full_date, 0.0)
 
+        # Public holidays: most retail trades reduced hours or shuts entirely.
+        # dim_date has always carried is_public_holiday, but nothing consumed it,
+        # so holidays traded like any other day and the flag was decorative.
+        holiday_mult = (
+            config.PUBLIC_HOLIDAY_VOLUME_MULTIPLIER
+            if full_date in PUBLIC_HOLIDAY_DATES
+            else 1.0
+        )
+
         # Add jitter (±15%)
         jitter = np.random.uniform(0.85, 1.15)
 
         daily_volume = int(
-            base_daily_volume * yearly_mult * month_mult * (1 + promo_boost) * jitter
+            base_daily_volume
+            * yearly_mult
+            * month_mult
+            * holiday_mult
+            * (1 + promo_boost)
+            * jitter
         )
         order_date_volumes[date_id] = daily_volume
 
