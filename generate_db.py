@@ -853,8 +853,36 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
         row[0]: {"price": row[1], "category": row[2]} for row in product_rows
     }
 
-    # Assign popularity weights
-    product_weights = {pid: np.random.uniform(0.1, 3.0) for pid in product_data.keys()}
+    # Popularity weights, precomputed once.
+    #
+    # The line-item loop below used to rebuild this 400-element array, apply the
+    # promo boost with a nested Python loop, and renormalise it *for every line
+    # item* — roughly 1.4M x 400 operations at default volumes, and the single
+    # hottest path in the generator. Instead we build the base array once and
+    # cache one promo-adjusted variant per distinct set of active promo
+    # categories; across a 5-year range there are only a handful of those.
+    product_ids = np.array(sorted(product_data.keys()))
+    base_weights = np.array([np.random.uniform(0.1, 3.0) for _ in product_ids])
+    base_weights = base_weights / base_weights.sum()
+    product_categories = np.array([product_data[pid]["category"] for pid in product_ids])
+
+    _weight_cache = {}
+
+    def weights_for(promo_categories):
+        """Normalised product-selection weights given the active promo categories.
+
+        Categories are deduplicated, so two concurrent promotions on the same
+        category boost it once rather than compounding to 2.25x.
+        """
+        key = frozenset(promo_categories)
+        cached = _weight_cache.get(key)
+        if cached is None:
+            w = base_weights.copy()
+            for category in key:
+                w[product_categories == category] *= 1.5
+            cached = w / w.sum()
+            _weight_cache[key] = cached
+        return cached
 
     # Get promotion dates for mapping
     promo_date_map = {}
@@ -893,19 +921,11 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
         order_full_date = date_lookup.get(date_id)
         active_promos = promo_date_map.get(order_full_date, [])
 
+        # Selection weights depend only on which promo categories are live
+        # today, so they are resolved once per order rather than per line item.
+        weights = weights_for(promo_category for _, promo_category, _ in active_promos)
+
         for _ in range(num_items):
-            # Select product based on popularity weights
-            product_ids = list(product_weights.keys())
-            weights = np.array([product_weights[pid] for pid in product_ids])
-            weights = weights / weights.sum()
-
-            # Boost weights for products in active promotions
-            for prom_id, promo_category, _ in active_promos:
-                for i, pid in enumerate(product_ids):
-                    if product_data[pid]["category"] == promo_category:
-                        weights[i] *= 1.5
-
-            weights = weights / weights.sum()
             product_id = int(np.random.choice(product_ids, p=weights))
 
             quantity = int(np.random.randint(1, 6))
