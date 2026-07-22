@@ -16,6 +16,34 @@
 #   - Don't delete any section headings or variable names
 # =============================================================================
 
+import os
+
+
+# -----------------------------------------------------------------------------
+# ENVIRONMENT OVERRIDES (advanced — you can ignore this)
+# -----------------------------------------------------------------------------
+# A few of the volume settings below can be overridden by setting an environment
+# variable of the same name before running the script. This exists so automated
+# test runs can build a tiny database quickly without editing this file:
+#
+#     $env:TARGET_ORDERS = 5000 ; python generate_db.py    # PowerShell
+#     TARGET_ORDERS=5000 python generate_db.py             # bash
+#
+# If you don't set anything, the values written in this file are used as normal.
+
+
+def _env_int(name, default):
+    """Return an integer setting, overridden by an environment variable if set."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(
+            f"Environment variable {name} must be a whole number, got {raw!r}"
+        )
+
 
 # -----------------------------------------------------------------------------
 # REPRODUCIBLE DATA
@@ -39,14 +67,14 @@ RANDOM_SEED = 42  # Only matters if USE_FIXED_SEED is True above
 #   400,000 orders  →  ~3 minutes
 #   1,000,000 orders → ~8 minutes
 
-TARGET_ORDERS = 400000  # Total number of customer orders to generate
-TARGET_ORDER_ITEMS = (
-    1000000  # Shown in the summary — actual count will be ~3.4x TARGET_ORDERS
-)
-NUM_STORES = 50  # Number of retail store locations
-NUM_SALESPERSONS = 100  # Total sales staff (spread across all stores)
-NUM_PRODUCTS = 400  # Total products in the catalogue
-NUM_CUSTOMERS = 75000  # Size of the customer pool (unique customer IDs)
+TARGET_ORDERS = _env_int("TARGET_ORDERS", 400000)  # Total customer orders to generate
+TARGET_ORDER_ITEMS = _env_int(
+    "TARGET_ORDER_ITEMS", 1000000
+)  # Shown in the summary — actual count will be ~3.4x TARGET_ORDERS
+NUM_STORES = _env_int("NUM_STORES", 50)  # Number of retail store locations
+NUM_SALESPERSONS = _env_int("NUM_SALESPERSONS", 100)  # Total sales staff (all stores)
+NUM_PRODUCTS = _env_int("NUM_PRODUCTS", 400)  # Total products in the catalogue
+NUM_CUSTOMERS = _env_int("NUM_CUSTOMERS", 75000)  # Customer pool (unique customer IDs)
 
 
 # -----------------------------------------------------------------------------
