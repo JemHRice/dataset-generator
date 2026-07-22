@@ -965,10 +965,13 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
     # Roll the line items up into the order header in one set-based statement.
     # Doing this as one UPDATE per order meant ~400k round-trips and was by far
     # the slowest step in the run.
+    # total_order_value is what the customer actually paid: the sum of the
+    # discounted line totals plus the shipping charge on the header. Leaving
+    # shipping out meant the header never reconciled to a real invoice.
     print("  Updating order totals...")
     cur.execute("""
         UPDATE fact_orders o
-        SET total_order_value = li.line_sum
+        SET total_order_value = li.line_sum + o.shipping_cost
         FROM (
             SELECT order_id, SUM(line_total) AS line_sum
             FROM fact_order_items
