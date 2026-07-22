@@ -863,7 +863,6 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
     date_lookup = {row[0]: row[1] for row in cur.fetchall()}
 
     line_items = []
-    order_totals = {}
 
     for order_id, (
         date_id,
@@ -880,7 +879,6 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
         # Determine number of items in order (1-5, avg ~4)
         num_items = np.random.choice([1, 2, 3, 4, 5], p=[0.05, 0.15, 0.3, 0.35, 0.15])
 
-        order_value = 0.0
         order_full_date = date_lookup.get(date_id)
         active_promos = promo_date_map.get(order_full_date, [])
 
@@ -927,7 +925,6 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
                     discount = np.random.uniform(0.15, 0.25)
 
             line_total = quantity * unit_price * (1.0 - discount)
-            order_value += line_total
 
             line_items.append(
                 (
@@ -941,9 +938,6 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
                 )
             )
 
-        order_totals[order_id] = order_value
-
-    # Update order totals in fact_orders
     print(f"  Inserting {len(line_items):,} line items...")
     execute_batch(
         cur,
@@ -957,13 +951,20 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
     )
     conn.commit()
 
-    # Update order totals
+    # Roll the line items up into the order header in one set-based statement.
+    # Doing this as one UPDATE per order meant ~400k round-trips and was by far
+    # the slowest step in the run.
     print("  Updating order totals...")
-    for order_id, total in order_totals.items():
-        cur.execute(
-            "UPDATE fact_orders SET total_order_value = %s WHERE order_id = %s;",
-            (total, order_id),
-        )
+    cur.execute("""
+        UPDATE fact_orders o
+        SET total_order_value = li.line_sum
+        FROM (
+            SELECT order_id, SUM(line_total) AS line_sum
+            FROM fact_order_items
+            GROUP BY order_id
+        ) li
+        WHERE o.order_id = li.order_id;
+    """)
     conn.commit()
 
     print(f"✓ {len(line_items):,} line items inserted")
