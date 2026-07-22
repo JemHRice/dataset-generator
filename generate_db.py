@@ -26,6 +26,13 @@ import pandas as pd
 from faker import Faker
 import config
 
+# Windows consoles default to cp1252, which cannot encode the ✓/✗/⚠ characters
+# used in the status output below. Without this, a status line raises
+# UnicodeEncodeError and a perfectly healthy run dies on its own logging.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # Apply random seed if configured
 if config.USE_FIXED_SEED:
     np.random.seed(config.RANDOM_SEED)
@@ -103,7 +110,11 @@ def connect_postgres(create_db=True):
             password=DB_PASSWORD,
         )
         return conn
-    except Exception as e:
+    except psycopg2.Error as e:
+        # Deliberately narrow: a bare `except Exception` here once caught a
+        # UnicodeEncodeError from the status prints above and reported it as a
+        # connection failure, which sent debugging in entirely the wrong
+        # direction. Only genuine driver errors should produce this message.
         print(f"✗ Database connection failed: {e}")
         print("Please ensure:")
         print(f"  - PostgreSQL is running on {DB_HOST}:{DB_PORT}")
