@@ -879,6 +879,15 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
     base_weights = base_weights / base_weights.sum()
     product_categories = np.array([product_data[pid]["category"] for pid in product_ids])
 
+    # Discounts were drawn without reference to the category margin, so a 30%
+    # promo on a 1.35x-margin category sold the line below unit cost. Cap the
+    # discount per category so every line keeps a little headroom above cost.
+    MIN_COST_HEADROOM = 1.05  # retain ~5% gross margin at maximum discount
+    max_discount_by_category = {
+        cat: max(0.0, 1.0 - (MIN_COST_HEADROOM / info["margin"]))
+        for cat, info in CATEGORIES.items()
+    }
+
     _weight_cache = {}
 
     def weights_for(promo_categories):
@@ -967,6 +976,9 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
                     discount = np.random.uniform(0.05, 0.15)
                 else:
                     discount = np.random.uniform(0.15, 0.25)
+
+            # Never discount a line below its cost floor (see above).
+            discount = min(discount, max_discount_by_category[product_category])
 
             line_total = quantity * unit_price * (1.0 - discount)
 
