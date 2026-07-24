@@ -13,17 +13,18 @@ Requirements:
     - Dependencies installed (pip install -r requirements.txt)
 """
 
+import json
 import os
 import sys
-import json
-from pathlib import Path
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
-import psycopg2
-from psycopg2.extras import execute_batch
+from pathlib import Path
+
 import numpy as np
-import pandas as pd
+import psycopg2
+from dotenv import load_dotenv
 from faker import Faker
+from psycopg2.extras import execute_batch
+
 import config
 
 # Windows consoles default to cp1252, which cannot encode the ✓/✗/⚠ characters
@@ -122,7 +123,7 @@ def connect_postgres(create_db=True):
         print("Please ensure:")
         print(f"  - PostgreSQL is running on {DB_HOST}:{DB_PORT}")
         print(f"  - User '{DB_USER}' exists")
-        print(f"  - .env file contains correct credentials")
+        print("  - .env file contains correct credentials")
         sys.exit(1)
 
 
@@ -934,10 +935,6 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
                 promo_date_map[current] = []
             promo_date_map[current].append((prom_id, category, float(discount_rate)))
             current += timedelta(days=1)
-
-    # Get order dates for reference
-    cur.execute("SELECT order_id, order_date_id FROM fact_orders ORDER BY order_id;")
-    order_dates = {row[0]: row[1] for row in cur.fetchall()}
 
     cur.execute("SELECT date_id, full_date FROM dim_date;")
     date_lookup = {row[0]: row[1] for row in cur.fetchall()}

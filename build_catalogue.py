@@ -24,6 +24,7 @@ Run with the ProductForge venv (it has torch + the model):
 """
 
 from __future__ import annotations
+
 import json
 import random
 import re
@@ -34,9 +35,10 @@ from pathlib import Path
 _PF_SRC = Path(__file__).parent.parent / "productforge" / "src"
 sys.path.insert(0, str(_PF_SRC))
 
-import config
 from productforge.brand import create_brand
 from productforge.generator import generate_products
+
+import config
 
 OUTPUT = Path(__file__).parent / "products.json"
 SEED = 42

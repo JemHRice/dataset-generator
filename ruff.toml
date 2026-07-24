@@ -1,0 +1,18 @@
+# Lint configuration. Deliberately a focused set rather than "everything":
+#   F  — pyflakes (unused imports/vars, undefined names — real bugs)
+#   E/W — pycodestyle errors/warnings
+#   I  — import sorting
+# The pedantic opinion rules (naive-datetime, blind-except) are intentionally
+# left off; the blind except in main() is there on purpose.
+line-length = 100
+
+[lint]
+select = ["F", "E", "W", "I"]
+# Long lines are almost all inline SQL VALUES clauses that don't benefit from
+# wrapping; the code was not written to a column limit.
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+# build_catalogue.py imports ProductForge from a sibling repo, which requires a
+# sys.path insert before the import — so those imports can't sit at the top.
+"build_catalogue.py" = ["E402"]
