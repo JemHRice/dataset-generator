@@ -17,8 +17,8 @@ Produces ~440k orders, ~1.5M line items, 50 stores, 400 products, 75k customers,
 ## Setup
 
 ```powershell
-git clone https://github.com/JemHRice/dataset-generator.git
-cd dataset-generator
+git clone https://github.com/JemHRice/sports-retail-analytics.git
+cd sports-retail-analytics
 
 python -m venv venv
 venv\Scripts\activate
@@ -38,7 +38,11 @@ Then run:
 python generate_db.py
 ```
 
-Takes about 3–5 minutes. Creates a database called `sports_retail` on `localhost:5432`.
+Takes about 2–3 minutes. Creates a database called `sports_retail` on `localhost:5432`.
+
+Every distribution the generator uses — demand model, customer behaviour,
+pricing, discounts, fulfillment — is documented in
+[docs/generator-assumptions.md](docs/generator-assumptions.md).
 
 ---
 

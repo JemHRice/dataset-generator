@@ -16,6 +16,33 @@
 #   - Don't delete any section headings or variable names
 # =============================================================================
 
+import os
+
+# -----------------------------------------------------------------------------
+# ENVIRONMENT OVERRIDES (advanced — you can ignore this)
+# -----------------------------------------------------------------------------
+# A few of the volume settings below can be overridden by setting an environment
+# variable of the same name before running the script. This exists so automated
+# test runs can build a tiny database quickly without editing this file:
+#
+#     $env:TARGET_ORDERS = 5000 ; python generate_db.py    # PowerShell
+#     TARGET_ORDERS=5000 python generate_db.py             # bash
+#
+# If you don't set anything, the values written in this file are used as normal.
+
+
+def _env_int(name, default):
+    """Return an integer setting, overridden by an environment variable if set."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(
+            f"Environment variable {name} must be a whole number, got {raw!r}"
+        )
+
 
 # -----------------------------------------------------------------------------
 # REPRODUCIBLE DATA
@@ -39,14 +66,14 @@ RANDOM_SEED = 42  # Only matters if USE_FIXED_SEED is True above
 #   400,000 orders  →  ~3 minutes
 #   1,000,000 orders → ~8 minutes
 
-TARGET_ORDERS = 400000  # Total number of customer orders to generate
-TARGET_ORDER_ITEMS = (
-    1000000  # Shown in the summary — actual count will be ~3.4x TARGET_ORDERS
-)
-NUM_STORES = 50  # Number of retail store locations
-NUM_SALESPERSONS = 100  # Total sales staff (spread across all stores)
-NUM_PRODUCTS = 400  # Total products in the catalogue
-NUM_CUSTOMERS = 75000  # Size of the customer pool (unique customer IDs)
+TARGET_ORDERS = _env_int("TARGET_ORDERS", 400000)  # Total customer orders to generate
+TARGET_ORDER_ITEMS = _env_int(
+    "TARGET_ORDER_ITEMS", 1000000
+)  # Shown in the summary — actual count will be ~3.4x TARGET_ORDERS
+NUM_STORES = _env_int("NUM_STORES", 50)  # Number of retail store locations
+NUM_SALESPERSONS = _env_int("NUM_SALESPERSONS", 100)  # Total sales staff (all stores)
+NUM_PRODUCTS = _env_int("NUM_PRODUCTS", 400)  # Total products in the catalogue
+NUM_CUSTOMERS = _env_int("NUM_CUSTOMERS", 75000)  # Customer pool (unique customer IDs)
 
 
 # -----------------------------------------------------------------------------
@@ -211,6 +238,56 @@ CATEGORIES = {
 
 
 # -----------------------------------------------------------------------------
+# PRICE BANDS
+# -----------------------------------------------------------------------------
+# What a product costs the business to buy in (unit_cost). The sale price is
+# this cost times the category margin set above.
+#
+# Each band is a (min, max) unit-cost range in dollars. Every subcategory is
+# mapped to a band below, so a cricket ball can't come out priced like a bike.
+# Anything not listed falls back to the "standard" band.
+
+PRICE_BANDS = {
+    "accessory": (3, 25),  # balls, caps, goggles, small add-ons
+    "standard": (15, 90),  # apparel, footwear, protective gear
+    "premium": (60, 300),  # racquets, bats, watches, hoops
+    "big_ticket": (200, 1500),  # bikes, golf club sets
+}
+
+# Which band each subcategory sits in. Keyed by subcategory name; where the same
+# name means different things across sports it is disambiguated by "Category/Sub".
+SUBCATEGORY_PRICE_BAND = {
+    "Balls": "accessory",
+    "Caps": "accessory",
+    "Goggles": "accessory",
+    "Fins": "accessory",
+    "Kickboards": "accessory",
+    "Accessories": "accessory",
+    "Resistance Bands": "accessory",
+    "Mats": "accessory",
+    "Gloves": "accessory",
+    "Pads": "standard",
+    "Helmets": "standard",
+    "Shoes": "standard",
+    "Boots": "standard",
+    "Jerseys": "standard",
+    "Apparel": "standard",
+    "Swimwear": "standard",
+    "Training Gear": "standard",
+    "Weights": "standard",
+    "Bats": "premium",
+    "Racquets": "premium",
+    "Watches": "premium",
+    "Hoops": "premium",
+    "Benches": "premium",
+    "Bags": "standard",
+    "Golf/Bags": "premium",  # golf bags run pricier than tennis bags
+    "Clubs": "big_ticket",
+    "Bikes": "big_ticket",
+}
+
+
+# -----------------------------------------------------------------------------
 # SHIPPING METHODS
 # -----------------------------------------------------------------------------
 # The delivery options available to customers.
@@ -221,6 +298,10 @@ CATEGORIES = {
 #   min_days  — fastest possible delivery (0 = same day)
 #   max_days  — slowest possible delivery
 #   cost      — flat fee in dollars (use 0.00 for free)
+#   weight    — how often this method is chosen, relative to the others. Higher
+#               = more common. These are relative, they need not sum to anything.
+#   pickup    — True for in-store collection (Click & Collect). Pickup orders
+#               have no delivery leg, so they never get a delivery date.
 
 SHIPPING_METHODS = [
     {
@@ -229,6 +310,7 @@ SHIPPING_METHODS = [
         "min_days": 5,
         "max_days": 8,
         "cost": 7.95,
+        "weight": 0.50,
     },
     {
         "name": "Express Post",
@@ -236,6 +318,7 @@ SHIPPING_METHODS = [
         "min_days": 2,
         "max_days": 3,
         "cost": 14.95,
+        "weight": 0.22,
     },
     {
         "name": "Same Day",
@@ -243,6 +326,7 @@ SHIPPING_METHODS = [
         "min_days": 0,
         "max_days": 1,
         "cost": 24.95,
+        "weight": 0.05,
     },
     {
         "name": "Click & Collect",
@@ -250,6 +334,8 @@ SHIPPING_METHODS = [
         "min_days": 0,
         "max_days": 0,
         "cost": 0.00,
+        "weight": 0.15,
+        "pickup": True,
     },
     {
         "name": "Overnight",
@@ -257,6 +343,7 @@ SHIPPING_METHODS = [
         "min_days": 1,
         "max_days": 2,
         "cost": 19.95,
+        "weight": 0.08,
     },
 ]
 
@@ -359,6 +446,12 @@ PROMOTIONS = [
 #
 # These are Australian national holidays 2020-2024.
 # Update these if you change your date range or want different holiday patterns.
+#
+# PUBLIC_HOLIDAY_VOLUME_MULTIPLIER — how much trade drops on a public holiday.
+#   0.45 means a holiday does about 45% of a normal day's orders. Set it to 1.0
+#   if you want holidays to trade normally, or 0.0 for "completely shut".
+
+PUBLIC_HOLIDAY_VOLUME_MULTIPLIER = 0.45
 
 PUBLIC_HOLIDAYS = [
     (2020, 1, 1),

@@ -13,18 +13,26 @@ Requirements:
     - Dependencies installed (pip install -r requirements.txt)
 """
 
+import json
 import os
 import sys
-import json
-from pathlib import Path
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
-import psycopg2
-from psycopg2.extras import execute_batch
+from pathlib import Path
+
 import numpy as np
-import pandas as pd
+import psycopg2
+from dotenv import load_dotenv
 from faker import Faker
+from psycopg2.extras import execute_batch
+
 import config
+
+# Windows consoles default to cp1252, which cannot encode the ✓/✗/⚠ characters
+# used in the status output below. Without this, a status line raises
+# UnicodeEncodeError and a perfectly healthy run dies on its own logging.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 # Apply random seed if configured
 if config.USE_FIXED_SEED:
@@ -56,6 +64,9 @@ SUBURBS_BY_STATE = config.SUBURBS_BY_STATE
 GENERATION_START_DATE = datetime(*config.START_DATE)
 GENERATION_END_DATE = datetime(*config.END_DATE)
 PUBLIC_HOLIDAYS = {datetime(*d) for d in config.PUBLIC_HOLIDAYS}
+# Same set as plain dates, for comparing against the date values coming back
+# out of dim_date (psycopg2 returns DATE columns as datetime.date, not datetime).
+PUBLIC_HOLIDAY_DATES = {d.date() for d in PUBLIC_HOLIDAYS}
 
 
 def connect_postgres(create_db=True):
@@ -103,12 +114,16 @@ def connect_postgres(create_db=True):
             password=DB_PASSWORD,
         )
         return conn
-    except Exception as e:
+    except psycopg2.Error as e:
+        # Deliberately narrow: a bare `except Exception` here once caught a
+        # UnicodeEncodeError from the status prints above and reported it as a
+        # connection failure, which sent debugging in entirely the wrong
+        # direction. Only genuine driver errors should produce this message.
         print(f"✗ Database connection failed: {e}")
         print("Please ensure:")
         print(f"  - PostgreSQL is running on {DB_HOST}:{DB_PORT}")
         print(f"  - User '{DB_USER}' exists")
-        print(f"  - .env file contains correct credentials")
+        print("  - .env file contains correct credentials")
         sys.exit(1)
 
 
@@ -460,14 +475,16 @@ def generate_dim_product():
         category = row["category"]
         subcategory = row["subcategory"]
 
-        # Price distribution: 40% budget ($5-$50), 40% mid ($50-$200), 20% premium ($200-$2000)
-        price_tier = np.random.choice(["budget", "mid", "premium"], p=[0.4, 0.4, 0.2])
-        if price_tier == "budget":
-            unit_cost = np.random.uniform(3, 30)
-        elif price_tier == "mid":
-            unit_cost = np.random.uniform(30, 120)
-        else:
-            unit_cost = np.random.uniform(120, 1200)
+        # Cost comes from the subcategory's price band, not a blind random tier —
+        # otherwise a cricket ball could price like a road bike. A "Category/Sub"
+        # key wins over a plain subcategory key when both are present, then we
+        # fall back to the standard band for anything unmapped.
+        band_name = config.SUBCATEGORY_PRICE_BAND.get(
+            f"{category}/{subcategory}",
+            config.SUBCATEGORY_PRICE_BAND.get(subcategory, "standard"),
+        )
+        cost_min, cost_max = config.PRICE_BANDS[band_name]
+        unit_cost = np.random.uniform(cost_min, cost_max)
 
         margin = CATEGORIES[category]["margin"]
         unit_price = unit_cost * margin
@@ -624,12 +641,24 @@ def generate_fact_orders(conn):
     date_map = {row[1]: row[0] for row in date_rows}
 
     cur.execute(
-        "SELECT shipping_method_id, flat_cost, estimated_days_min, estimated_days_max FROM dim_shipping_method;"
+        "SELECT shipping_method_id, method_name, flat_cost, estimated_days_min, estimated_days_max FROM dim_shipping_method;"
     )
     shipping_rows = cur.fetchall()
     shipping_methods = [row[0] for row in shipping_rows]
-    shipping_cost_lookup = {row[0]: float(row[1]) for row in shipping_rows}
-    shipping_days_lookup = {row[0]: (int(row[2]), int(row[3])) for row in shipping_rows}
+    shipping_cost_lookup = {row[0]: float(row[2]) for row in shipping_rows}
+    shipping_days_lookup = {row[0]: (int(row[3]), int(row[4])) for row in shipping_rows}
+
+    # Method choice is weighted (most orders ship Standard, few Same Day) and we
+    # track which methods are in-store pickup, keyed off config by name. Pickup
+    # orders are collected, so they never receive a delivery date below.
+    _method_cfg = {m["name"]: m for m in SHIPPING_METHODS}
+    shipping_pickup_lookup = {
+        row[0]: _method_cfg.get(row[1], {}).get("pickup", False) for row in shipping_rows
+    }
+    shipping_choice_weights = np.array(
+        [_method_cfg.get(row[1], {}).get("weight", 1.0) for row in shipping_rows]
+    )
+    shipping_choice_weights = shipping_choice_weights / shipping_choice_weights.sum()
 
     cur.execute(
         "SELECT promotion_id, start_date, end_date, affected_category, discount_rate FROM dim_promotions;"
@@ -672,19 +701,15 @@ def generate_fact_orders(conn):
     days_in_period = (GENERATION_END_DATE - GENERATION_START_DATE).days + 1
     base_daily_volume = TARGET_ORDERS / days_in_period
 
-    # Apply yearly trends: ±5% to ±15% change per year
-    _y2020 = 1.0
-    _y2021 = _y2020 + np.random.uniform(-0.05, 0.15)
-    _y2022 = _y2021 + np.random.uniform(-0.05, 0.15)
-    _y2023 = _y2022 + np.random.uniform(-0.05, 0.15)
-    _y2024 = _y2023 + np.random.uniform(-0.05, 0.15)
-    yearly_multipliers = {
-        2020: _y2020,
-        2021: _y2021,
-        2022: _y2022,
-        2023: _y2023,
-        2024: _y2024,
-    }
+    # Year-on-year trend: -5% to +15% change per year, compounding from a base
+    # of 1.0 in the first year. Derived from the configured date range — this
+    # was previously a hardcoded 2020-2024 map, so changing START_DATE/END_DATE
+    # silently flattened the growth trend to 1.0 for every year outside it.
+    yearly_multipliers = {}
+    _multiplier = 1.0
+    for _year in range(GENERATION_START_DATE.year, GENERATION_END_DATE.year + 1):
+        yearly_multipliers[_year] = _multiplier
+        _multiplier += np.random.uniform(-0.05, 0.15)
 
     # Apply promotional boosts
     for prom_id, start, end, category, discount_rate in promotions:
@@ -719,11 +744,25 @@ def generate_fact_orders(conn):
         # Promotions boost
         promo_boost = daily_promo_boosts.get(full_date, 0.0)
 
+        # Public holidays: most retail trades reduced hours or shuts entirely.
+        # dim_date has always carried is_public_holiday, but nothing consumed it,
+        # so holidays traded like any other day and the flag was decorative.
+        holiday_mult = (
+            config.PUBLIC_HOLIDAY_VOLUME_MULTIPLIER
+            if full_date in PUBLIC_HOLIDAY_DATES
+            else 1.0
+        )
+
         # Add jitter (±15%)
         jitter = np.random.uniform(0.85, 1.15)
 
         daily_volume = int(
-            base_daily_volume * yearly_mult * month_mult * (1 + promo_boost) * jitter
+            base_daily_volume
+            * yearly_mult
+            * month_mult
+            * holiday_mult
+            * (1 + promo_boost)
+            * jitter
         )
         order_date_volumes[date_id] = daily_volume
 
@@ -766,7 +805,9 @@ def generate_fact_orders(conn):
             sp_weights = sp_weights / sp_weights.sum()
             salesperson_id = int(np.random.choice(available_salespersons, p=sp_weights))
 
-            shipping_method_id = int(np.random.choice(shipping_methods))
+            shipping_method_id = int(
+                np.random.choice(shipping_methods, p=shipping_choice_weights)
+            )
             customer_id = int(day_customers[i])
 
             # Order status: 94% delivered, 3% processing, 3% cancelled
@@ -779,16 +820,19 @@ def generate_fact_orders(conn):
             # Fulfillment dates: only Delivered orders have ship + delivery dates.
             # Processing (not yet shipped) and Cancelled have neither. Dates that
             # fall past the end of dim_date are left NULL (still in transit).
+            # In-store pickup (Click & Collect) has a ready/ship date but no
+            # delivery leg, so its delivery date stays NULL.
             ship_date_id = None
             delivery_date_id = None
             if status == "Delivered":
                 lag = int(np.random.randint(0, 3))  # 0-2 day processing lag
                 ship_date = full_date + timedelta(days=lag)
                 ship_date_id = date_map.get(ship_date)
-                dmin, dmax = shipping_days_lookup[shipping_method_id]
-                transit = int(np.random.randint(dmin, dmax + 1))
-                delivery_date = ship_date + timedelta(days=transit)
-                delivery_date_id = date_map.get(delivery_date)
+                if not shipping_pickup_lookup[shipping_method_id]:
+                    dmin, dmax = shipping_days_lookup[shipping_method_id]
+                    transit = int(np.random.randint(dmin, dmax + 1))
+                    delivery_date = ship_date + timedelta(days=transit)
+                    delivery_date_id = date_map.get(delivery_date)
 
             # Placeholder for total_order_value (will be calculated from line items)
             total_order_value = 0.0
@@ -842,8 +886,45 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
         row[0]: {"price": row[1], "category": row[2]} for row in product_rows
     }
 
-    # Assign popularity weights
-    product_weights = {pid: np.random.uniform(0.1, 3.0) for pid in product_data.keys()}
+    # Popularity weights, precomputed once.
+    #
+    # The line-item loop below used to rebuild this 400-element array, apply the
+    # promo boost with a nested Python loop, and renormalise it *for every line
+    # item* — roughly 1.4M x 400 operations at default volumes, and the single
+    # hottest path in the generator. Instead we build the base array once and
+    # cache one promo-adjusted variant per distinct set of active promo
+    # categories; across a 5-year range there are only a handful of those.
+    product_ids = np.array(sorted(product_data.keys()))
+    base_weights = np.array([np.random.uniform(0.1, 3.0) for _ in product_ids])
+    base_weights = base_weights / base_weights.sum()
+    product_categories = np.array([product_data[pid]["category"] for pid in product_ids])
+
+    # Discounts were drawn without reference to the category margin, so a 30%
+    # promo on a 1.35x-margin category sold the line below unit cost. Cap the
+    # discount per category so every line keeps a little headroom above cost.
+    MIN_COST_HEADROOM = 1.05  # retain ~5% gross margin at maximum discount
+    max_discount_by_category = {
+        cat: max(0.0, 1.0 - (MIN_COST_HEADROOM / info["margin"]))
+        for cat, info in CATEGORIES.items()
+    }
+
+    _weight_cache = {}
+
+    def weights_for(promo_categories):
+        """Normalised product-selection weights given the active promo categories.
+
+        Categories are deduplicated, so two concurrent promotions on the same
+        category boost it once rather than compounding to 2.25x.
+        """
+        key = frozenset(promo_categories)
+        cached = _weight_cache.get(key)
+        if cached is None:
+            w = base_weights.copy()
+            for category in key:
+                w[product_categories == category] *= 1.5
+            cached = w / w.sum()
+            _weight_cache[key] = cached
+        return cached
 
     # Get promotion dates for mapping
     promo_date_map = {}
@@ -855,15 +936,10 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
             promo_date_map[current].append((prom_id, category, float(discount_rate)))
             current += timedelta(days=1)
 
-    # Get order dates for reference
-    cur.execute("SELECT order_id, order_date_id FROM fact_orders ORDER BY order_id;")
-    order_dates = {row[0]: row[1] for row in cur.fetchall()}
-
     cur.execute("SELECT date_id, full_date FROM dim_date;")
     date_lookup = {row[0]: row[1] for row in cur.fetchall()}
 
     line_items = []
-    order_totals = {}
 
     for order_id, (
         date_id,
@@ -880,23 +956,14 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
         # Determine number of items in order (1-5, avg ~4)
         num_items = np.random.choice([1, 2, 3, 4, 5], p=[0.05, 0.15, 0.3, 0.35, 0.15])
 
-        order_value = 0.0
         order_full_date = date_lookup.get(date_id)
         active_promos = promo_date_map.get(order_full_date, [])
 
+        # Selection weights depend only on which promo categories are live
+        # today, so they are resolved once per order rather than per line item.
+        weights = weights_for(promo_category for _, promo_category, _ in active_promos)
+
         for _ in range(num_items):
-            # Select product based on popularity weights
-            product_ids = list(product_weights.keys())
-            weights = np.array([product_weights[pid] for pid in product_ids])
-            weights = weights / weights.sum()
-
-            # Boost weights for products in active promotions
-            for prom_id, promo_category, _ in active_promos:
-                for i, pid in enumerate(product_ids):
-                    if product_data[pid]["category"] == promo_category:
-                        weights[i] *= 1.5
-
-            weights = weights / weights.sum()
             product_id = int(np.random.choice(product_ids, p=weights))
 
             quantity = int(np.random.randint(1, 6))
@@ -926,8 +993,10 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
                 else:
                     discount = np.random.uniform(0.15, 0.25)
 
+            # Never discount a line below its cost floor (see above).
+            discount = min(discount, max_discount_by_category[product_category])
+
             line_total = quantity * unit_price * (1.0 - discount)
-            order_value += line_total
 
             line_items.append(
                 (
@@ -941,9 +1010,6 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
                 )
             )
 
-        order_totals[order_id] = order_value
-
-    # Update order totals in fact_orders
     print(f"  Inserting {len(line_items):,} line items...")
     execute_batch(
         cur,
@@ -957,13 +1023,23 @@ def generate_fact_order_items(conn, orders, products_by_category, date_map, prom
     )
     conn.commit()
 
-    # Update order totals
+    # Roll the line items up into the order header in one set-based statement.
+    # Doing this as one UPDATE per order meant ~400k round-trips and was by far
+    # the slowest step in the run.
+    # total_order_value is what the customer actually paid: the sum of the
+    # discounted line totals plus the shipping charge on the header. Leaving
+    # shipping out meant the header never reconciled to a real invoice.
     print("  Updating order totals...")
-    for order_id, total in order_totals.items():
-        cur.execute(
-            "UPDATE fact_orders SET total_order_value = %s WHERE order_id = %s;",
-            (total, order_id),
-        )
+    cur.execute("""
+        UPDATE fact_orders o
+        SET total_order_value = li.line_sum + o.shipping_cost
+        FROM (
+            SELECT order_id, SUM(line_total) AS line_sum
+            FROM fact_order_items
+            GROUP BY order_id
+        ) li
+        WHERE o.order_id = li.order_id;
+    """)
     conn.commit()
 
     print(f"✓ {len(line_items):,} line items inserted")
