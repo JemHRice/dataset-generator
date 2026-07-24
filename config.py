@@ -299,6 +299,10 @@ SUBCATEGORY_PRICE_BAND = {
 #   min_days  — fastest possible delivery (0 = same day)
 #   max_days  — slowest possible delivery
 #   cost      — flat fee in dollars (use 0.00 for free)
+#   weight    — how often this method is chosen, relative to the others. Higher
+#               = more common. These are relative, they need not sum to anything.
+#   pickup    — True for in-store collection (Click & Collect). Pickup orders
+#               have no delivery leg, so they never get a delivery date.
 
 SHIPPING_METHODS = [
     {
@@ -307,6 +311,7 @@ SHIPPING_METHODS = [
         "min_days": 5,
         "max_days": 8,
         "cost": 7.95,
+        "weight": 0.50,
     },
     {
         "name": "Express Post",
@@ -314,6 +319,7 @@ SHIPPING_METHODS = [
         "min_days": 2,
         "max_days": 3,
         "cost": 14.95,
+        "weight": 0.22,
     },
     {
         "name": "Same Day",
@@ -321,6 +327,7 @@ SHIPPING_METHODS = [
         "min_days": 0,
         "max_days": 1,
         "cost": 24.95,
+        "weight": 0.05,
     },
     {
         "name": "Click & Collect",
@@ -328,6 +335,8 @@ SHIPPING_METHODS = [
         "min_days": 0,
         "max_days": 0,
         "cost": 0.00,
+        "weight": 0.15,
+        "pickup": True,
     },
     {
         "name": "Overnight",
@@ -335,6 +344,7 @@ SHIPPING_METHODS = [
         "min_days": 1,
         "max_days": 2,
         "cost": 19.95,
+        "weight": 0.08,
     },
 ]
 

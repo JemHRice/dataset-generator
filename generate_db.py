@@ -640,12 +640,24 @@ def generate_fact_orders(conn):
     date_map = {row[1]: row[0] for row in date_rows}
 
     cur.execute(
-        "SELECT shipping_method_id, flat_cost, estimated_days_min, estimated_days_max FROM dim_shipping_method;"
+        "SELECT shipping_method_id, method_name, flat_cost, estimated_days_min, estimated_days_max FROM dim_shipping_method;"
     )
     shipping_rows = cur.fetchall()
     shipping_methods = [row[0] for row in shipping_rows]
-    shipping_cost_lookup = {row[0]: float(row[1]) for row in shipping_rows}
-    shipping_days_lookup = {row[0]: (int(row[2]), int(row[3])) for row in shipping_rows}
+    shipping_cost_lookup = {row[0]: float(row[2]) for row in shipping_rows}
+    shipping_days_lookup = {row[0]: (int(row[3]), int(row[4])) for row in shipping_rows}
+
+    # Method choice is weighted (most orders ship Standard, few Same Day) and we
+    # track which methods are in-store pickup, keyed off config by name. Pickup
+    # orders are collected, so they never receive a delivery date below.
+    _method_cfg = {m["name"]: m for m in SHIPPING_METHODS}
+    shipping_pickup_lookup = {
+        row[0]: _method_cfg.get(row[1], {}).get("pickup", False) for row in shipping_rows
+    }
+    shipping_choice_weights = np.array(
+        [_method_cfg.get(row[1], {}).get("weight", 1.0) for row in shipping_rows]
+    )
+    shipping_choice_weights = shipping_choice_weights / shipping_choice_weights.sum()
 
     cur.execute(
         "SELECT promotion_id, start_date, end_date, affected_category, discount_rate FROM dim_promotions;"
@@ -792,7 +804,9 @@ def generate_fact_orders(conn):
             sp_weights = sp_weights / sp_weights.sum()
             salesperson_id = int(np.random.choice(available_salespersons, p=sp_weights))
 
-            shipping_method_id = int(np.random.choice(shipping_methods))
+            shipping_method_id = int(
+                np.random.choice(shipping_methods, p=shipping_choice_weights)
+            )
             customer_id = int(day_customers[i])
 
             # Order status: 94% delivered, 3% processing, 3% cancelled
@@ -805,16 +819,19 @@ def generate_fact_orders(conn):
             # Fulfillment dates: only Delivered orders have ship + delivery dates.
             # Processing (not yet shipped) and Cancelled have neither. Dates that
             # fall past the end of dim_date are left NULL (still in transit).
+            # In-store pickup (Click & Collect) has a ready/ship date but no
+            # delivery leg, so its delivery date stays NULL.
             ship_date_id = None
             delivery_date_id = None
             if status == "Delivered":
                 lag = int(np.random.randint(0, 3))  # 0-2 day processing lag
                 ship_date = full_date + timedelta(days=lag)
                 ship_date_id = date_map.get(ship_date)
-                dmin, dmax = shipping_days_lookup[shipping_method_id]
-                transit = int(np.random.randint(dmin, dmax + 1))
-                delivery_date = ship_date + timedelta(days=transit)
-                delivery_date_id = date_map.get(delivery_date)
+                if not shipping_pickup_lookup[shipping_method_id]:
+                    dmin, dmax = shipping_days_lookup[shipping_method_id]
+                    transit = int(np.random.randint(dmin, dmax + 1))
+                    delivery_date = ship_date + timedelta(days=transit)
+                    delivery_date_id = date_map.get(delivery_date)
 
             # Placeholder for total_order_value (will be calculated from line items)
             total_order_value = 0.0
