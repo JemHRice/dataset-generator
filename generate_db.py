@@ -474,14 +474,16 @@ def generate_dim_product():
         category = row["category"]
         subcategory = row["subcategory"]
 
-        # Price distribution: 40% budget ($5-$50), 40% mid ($50-$200), 20% premium ($200-$2000)
-        price_tier = np.random.choice(["budget", "mid", "premium"], p=[0.4, 0.4, 0.2])
-        if price_tier == "budget":
-            unit_cost = np.random.uniform(3, 30)
-        elif price_tier == "mid":
-            unit_cost = np.random.uniform(30, 120)
-        else:
-            unit_cost = np.random.uniform(120, 1200)
+        # Cost comes from the subcategory's price band, not a blind random tier —
+        # otherwise a cricket ball could price like a road bike. A "Category/Sub"
+        # key wins over a plain subcategory key when both are present, then we
+        # fall back to the standard band for anything unmapped.
+        band_name = config.SUBCATEGORY_PRICE_BAND.get(
+            f"{category}/{subcategory}",
+            config.SUBCATEGORY_PRICE_BAND.get(subcategory, "standard"),
+        )
+        cost_min, cost_max = config.PRICE_BANDS[band_name]
+        unit_cost = np.random.uniform(cost_min, cost_max)
 
         margin = CATEGORIES[category]["margin"]
         unit_price = unit_cost * margin

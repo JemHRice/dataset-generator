@@ -239,6 +239,56 @@ CATEGORIES = {
 
 
 # -----------------------------------------------------------------------------
+# PRICE BANDS
+# -----------------------------------------------------------------------------
+# What a product costs the business to buy in (unit_cost). The sale price is
+# this cost times the category margin set above.
+#
+# Each band is a (min, max) unit-cost range in dollars. Every subcategory is
+# mapped to a band below, so a cricket ball can't come out priced like a bike.
+# Anything not listed falls back to the "standard" band.
+
+PRICE_BANDS = {
+    "accessory": (3, 25),  # balls, caps, goggles, small add-ons
+    "standard": (15, 90),  # apparel, footwear, protective gear
+    "premium": (60, 300),  # racquets, bats, watches, hoops
+    "big_ticket": (200, 1500),  # bikes, golf club sets
+}
+
+# Which band each subcategory sits in. Keyed by subcategory name; where the same
+# name means different things across sports it is disambiguated by "Category/Sub".
+SUBCATEGORY_PRICE_BAND = {
+    "Balls": "accessory",
+    "Caps": "accessory",
+    "Goggles": "accessory",
+    "Fins": "accessory",
+    "Kickboards": "accessory",
+    "Accessories": "accessory",
+    "Resistance Bands": "accessory",
+    "Mats": "accessory",
+    "Gloves": "accessory",
+    "Pads": "standard",
+    "Helmets": "standard",
+    "Shoes": "standard",
+    "Boots": "standard",
+    "Jerseys": "standard",
+    "Apparel": "standard",
+    "Swimwear": "standard",
+    "Training Gear": "standard",
+    "Weights": "standard",
+    "Bats": "premium",
+    "Racquets": "premium",
+    "Watches": "premium",
+    "Hoops": "premium",
+    "Benches": "premium",
+    "Bags": "standard",
+    "Golf/Bags": "premium",  # golf bags run pricier than tennis bags
+    "Clubs": "big_ticket",
+    "Bikes": "big_ticket",
+}
+
+
+# -----------------------------------------------------------------------------
 # SHIPPING METHODS
 # -----------------------------------------------------------------------------
 # The delivery options available to customers.
